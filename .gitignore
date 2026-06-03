@@ -1,0 +1,17 @@
+# Binaries
+*.exe
+*.out
+bin/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Env / secrets
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

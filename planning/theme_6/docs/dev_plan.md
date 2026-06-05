@@ -74,12 +74,24 @@ type Dispatcher interface {
 
 ### Implementations
 
+Channels are pluggable behind the `Channel` interface (IDD). The v1 email channel is **Resend** (HTTPS API)
+— chosen because DigitalOcean blocks outbound SMTP ports, so an HTTPS provider is the reliable path (see the
+`jupiter-infra` Theme 6 plan). Other providers (Postmark, SES) or an SMTP channel can be added later as
+additional `Channel` implementations with no consumer change.
+
 - [ ] `notify/dispatcher.go` — a default `Dispatcher` (channel-name → `Channel` map); `ErrUnknownChannel`
-- [ ] `notify/email.go` — `EmailChannel` implementing `Channel` over SMTP. Config struct (host, port, from,
-      auth) passed in — sourced from env by the consumer, transport provisioned by `jupiter-infra`. Uses
-      stdlib `net/smtp` (or a thin, well-maintained SMTP lib); supports plain-text + optional HTML.
+- [ ] `notify/resend.go` — `ResendChannel` implementing `Channel` over Resend's **HTTPS send API** (a thin
+      `net/http` + JSON client, no heavy vendor SDK, to keep core deps minimal). Config: API key + From
+      address, passed in (sourced from env by the consumer; provisioned by `jupiter-infra`). Sends
+      plain-text + optional HTML; surfaces Resend errors so the task engine can retry.
+- [ ] `notify/log.go` — a `LogChannel` that writes the message to a logger instead of sending — the
+      local-dev / `NOTIFY_CHANNEL=log` path, so developers never send real mail
 - [ ] `notify/memory.go` — an in-memory `Channel`/`Dispatcher` that records sent messages, so consumers can
-      unit-test "a notification was sent" without a real SMTP server
+      unit-test "a notification was sent" without any network call
+
+> **Adding a provider later (IDD):** a `PostmarkChannel` / `SESChannel` / `SMTPChannel` implements the same
+> `Channel` and registers with the `Dispatcher`; the consumer picks the active email channel via config
+> (e.g. `NOTIFY_CHANNEL=resend|log`). Nothing else changes — multiple solutions can coexist over time.
 
 ### Async note
 
@@ -90,17 +102,18 @@ Core does not couple the two — it just provides the delivery primitive.
 ### Tasks
 
 - [ ] Define `Channel`, `Message`, `Dispatcher`
-- [ ] `EmailChannel` (SMTP) + config
+- [ ] `ResendChannel` (HTTPS) + config; `LogChannel` for dev
 - [ ] in-memory channel/dispatcher for tests
-- [ ] Unit tests: dispatch routing, unknown-channel error, email rendering (against a fake SMTP / recorder)
+- [ ] Unit tests: dispatch routing, unknown-channel error, Resend request shape (against an `httptest` server)
 - [ ] README: document the `notify` capability; channels are pluggable, recipients are channel-specific
-- [ ] Keep dependencies tight — SMTP only; no domain packages
+- [ ] Keep dependencies tight — `net/http` only for Resend; no domain packages
 
 ### Definition of Done
 
-- A consumer can register an `EmailChannel` and `Dispatcher.Send(ctx, "email", msg)` to deliver email
-- Adding a `SlackChannel` / `SMSChannel` later is a new `Channel` behind the same interface — no consumer change
-- Tests use the in-memory channel; no SMTP dependency
+- A consumer can register the `ResendChannel` and `Dispatcher.Send(ctx, "email", msg)` to deliver email
+- Adding another email provider, or a `SlackChannel` / `SMSChannel`, is a new `Channel` behind the same
+  interface — no consumer change
+- Tests use the in-memory channel / `httptest`; no network or vendor dependency
 - No domain logic or storage enters core
 
 ---
@@ -117,3 +130,4 @@ Core does not couple the two — it just provides the delivery primitive.
 | Version | Date | Summary | Author |
 |---|---|---|---|
 | 0.1 | 2026-06-05 | Initial plan — add a generic, interface-driven **notification delivery** capability (`notify` package): `Channel`/`Message`/`Dispatcher`, an SMTP `EmailChannel`, and an in-memory channel for tests. Third core capability after `auth` and `tasks`; async via the `tasks` engine; reusable by any product. | — |
+| 0.2 | 2026-06-05 | v1 email channel = **Resend** (HTTPS API) instead of SMTP — DigitalOcean blocks SMTP ports; HTTPS is the reliable path. Added a `LogChannel` for local dev; tests via `httptest`/in-memory. Resend is one `Channel` impl behind the interface — Postmark/SES/SMTP/Slack/SMS addable later (IDD), selected via `NOTIFY_CHANNEL`. | — |

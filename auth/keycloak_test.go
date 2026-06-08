@@ -191,11 +191,17 @@ func makeJWT(payload any) string {
 	return "header." + base64.RawURLEncoding.EncodeToString(b) + ".sig"
 }
 
+var stormMapping = defaultRoleMapping
+var sportstrakMapping = RoleMapping{
+	Precedence: []string{"admin", "org", "stat", "crowd"},
+	Default:    "crowd",
+}
+
 func TestExtractKeycloakRole_RealmAdmin(t *testing.T) {
 	tok := makeJWT(map[string]any{
 		"realm_access": map[string]any{"roles": []string{"admin", "offline_access"}},
 	})
-	if got := extractKeycloakRole(tok, "my-client"); got != "admin" {
+	if got := extractKeycloakRole(tok, "my-client", stormMapping); got != "admin" {
 		t.Errorf("got %q, want admin", got)
 	}
 }
@@ -206,7 +212,7 @@ func TestExtractKeycloakRole_ClientManager(t *testing.T) {
 			"my-client": map[string]any{"roles": []string{"manager"}},
 		},
 	})
-	if got := extractKeycloakRole(tok, "my-client"); got != "manager" {
+	if got := extractKeycloakRole(tok, "my-client", stormMapping); got != "manager" {
 		t.Errorf("got %q, want manager", got)
 	}
 }
@@ -218,7 +224,7 @@ func TestExtractKeycloakRole_AdminBeatsManager(t *testing.T) {
 			"my-client": map[string]any{"roles": []string{"admin"}},
 		},
 	})
-	if got := extractKeycloakRole(tok, "my-client"); got != "admin" {
+	if got := extractKeycloakRole(tok, "my-client", stormMapping); got != "admin" {
 		t.Errorf("got %q, want admin", got)
 	}
 }
@@ -227,20 +233,76 @@ func TestExtractKeycloakRole_NoMatchDefaultsToStaff(t *testing.T) {
 	tok := makeJWT(map[string]any{
 		"realm_access": map[string]any{"roles": []string{"offline_access", "uma_authorization"}},
 	})
-	if got := extractKeycloakRole(tok, "my-client"); got != "staff" {
+	if got := extractKeycloakRole(tok, "my-client", stormMapping); got != "staff" {
 		t.Errorf("got %q, want staff", got)
 	}
 }
 
 func TestExtractKeycloakRole_MalformedToken(t *testing.T) {
-	if got := extractKeycloakRole("notajwt", "client"); got != "staff" {
+	if got := extractKeycloakRole("notajwt", "client", stormMapping); got != "staff" {
 		t.Errorf("got %q, want staff", got)
 	}
 }
 
 func TestExtractKeycloakRole_BadBase64(t *testing.T) {
-	if got := extractKeycloakRole("h.!!!.s", "client"); got != "staff" {
+	if got := extractKeycloakRole("h.!!!.s", "client", stormMapping); got != "staff" {
 		t.Errorf("got %q, want staff", got)
+	}
+}
+
+func TestExtractKeycloakRole_SportstrakOrg(t *testing.T) {
+	tok := makeJWT(map[string]any{
+		"resource_access": map[string]any{
+			"sportstrak-api": map[string]any{"roles": []string{"org"}},
+		},
+	})
+	if got := extractKeycloakRole(tok, "sportstrak-api", sportstrakMapping); got != "org" {
+		t.Errorf("got %q, want org", got)
+	}
+}
+
+func TestExtractKeycloakRole_SportstrakAdminBeatsStat(t *testing.T) {
+	tok := makeJWT(map[string]any{
+		"realm_access": map[string]any{"roles": []string{"stat"}},
+		"resource_access": map[string]any{
+			"sportstrak-api": map[string]any{"roles": []string{"admin"}},
+		},
+	})
+	if got := extractKeycloakRole(tok, "sportstrak-api", sportstrakMapping); got != "admin" {
+		t.Errorf("got %q, want admin", got)
+	}
+}
+
+func TestExtractKeycloakRole_SportstrakDefaultCrowd(t *testing.T) {
+	tok := makeJWT(map[string]any{
+		"realm_access": map[string]any{"roles": []string{"offline_access"}},
+	})
+	if got := extractKeycloakRole(tok, "sportstrak-api", sportstrakMapping); got != "crowd" {
+		t.Errorf("got %q, want crowd", got)
+	}
+}
+
+func TestExtractKeycloakRole_StormUnchangedWithDefaultMapping(t *testing.T) {
+	tok := makeJWT(map[string]any{
+		"realm_access": map[string]any{"roles": []string{"manager"}},
+	})
+	// Storm handler uses no explicit mapping — effectiveMapping() returns defaultRoleMapping
+	h := &KeycloakHandler{}
+	got := extractKeycloakRole(tok, "my-client", h.effectiveMapping())
+	if got != "manager" {
+		t.Errorf("got %q, want manager", got)
+	}
+}
+
+func TestWithRoleMapping_Chaining(t *testing.T) {
+	h := NewKeycloakHandler("http://kc:8080", "", "realm", "cid", "csec", "http://api", "sec", "").
+		WithRoleMapping(sportstrakMapping)
+	tok := makeJWT(map[string]any{
+		"realm_access": map[string]any{"roles": []string{"stat"}},
+	})
+	got := extractKeycloakRole(tok, "cid", h.effectiveMapping())
+	if got != "stat" {
+		t.Errorf("got %q, want stat", got)
 	}
 }
 

@@ -14,6 +14,22 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// RoleMapping controls how Keycloak realm/client roles are resolved to a single
+// session role. Precedence is checked highest-priority first; the first match wins.
+// Default is returned when no Precedence role is present in the token.
+//
+// Storm default: Precedence ["admin","manager","staff"], Default "staff".
+// Sportstrak example: Precedence ["admin","org","stat","crowd"], Default "crowd".
+type RoleMapping struct {
+	Precedence []string
+	Default    string
+}
+
+var defaultRoleMapping = RoleMapping{
+	Precedence: []string{"admin", "manager", "staff"},
+	Default:    "staff",
+}
+
 // KeycloakHandler manages Keycloak OIDC login, callback, logout, and device flow.
 type KeycloakHandler struct {
 	config        *oauth2.Config
@@ -23,12 +39,27 @@ type KeycloakHandler struct {
 	cliClientID   string
 	sessionSecret string
 	baseURL       string
+	roleMapping   RoleMapping
 	// fwdHost and fwdProto are the public Keycloak hostname and scheme (derived from publicURL).
 	// They are sent as X-Forwarded-Host / X-Forwarded-Proto on internal server-to-server calls so
 	// that Keycloak (which uses KC_PROXY_HEADERS=xforwarded) computes the correct https:// issuer
 	// instead of falling back to the internal http://keycloak:8080 request URL.
 	fwdHost  string
 	fwdProto string
+}
+
+// WithRoleMapping sets a custom role mapping for this handler and returns the handler
+// for chaining. When not called, Storm's default mapping is used (admin > manager > staff).
+func (h *KeycloakHandler) WithRoleMapping(m RoleMapping) *KeycloakHandler {
+	h.roleMapping = m
+	return h
+}
+
+func (h *KeycloakHandler) effectiveMapping() RoleMapping {
+	if len(h.roleMapping.Precedence) == 0 {
+		return defaultRoleMapping
+	}
+	return h.roleMapping
 }
 
 // NewKeycloakHandler creates a Keycloak OIDC handler.
@@ -138,7 +169,7 @@ func (h *KeycloakHandler) Callback(c *gin.Context) {
 		return
 	}
 
-	role := extractKeycloakRole(token.AccessToken, h.config.ClientID)
+	role := extractKeycloakRole(token.AccessToken, h.config.ClientID, h.effectiveMapping())
 
 	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
 	if err != nil {
@@ -251,7 +282,7 @@ func (h *KeycloakHandler) DeviceToken(c *gin.Context) {
 		return
 	}
 
-	role := extractKeycloakRole(accessToken, h.cliClientID)
+	role := extractKeycloakRole(accessToken, h.cliClientID, h.effectiveMapping())
 
 	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
 	if err != nil {
@@ -284,7 +315,7 @@ func (h *KeycloakHandler) ExchangeToken(c *gin.Context) {
 		return
 	}
 
-	role := extractKeycloakRole(req.AccessToken, h.config.ClientID)
+	role := extractKeycloakRole(req.AccessToken, h.config.ClientID, h.effectiveMapping())
 
 	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
 	if err != nil {
@@ -318,21 +349,20 @@ type keycloakTokenClaims struct {
 // obtained directly from Keycloak's token endpoint over HTTPS/TLS. Do not reuse this
 // helper for tokens supplied by clients or read from headers, cookies, query params,
 // logs, or any other untrusted source.
-// It returns the highest-priority app role found in realm_access or
-// resource_access[clientID]. Priority: admin > manager > staff. Defaults to "staff"
-// if no recognised role is present.
-func extractKeycloakRole(accessToken, clientID string) string {
+// It returns the highest-priority role from m.Precedence found in realm_access or
+// resource_access[clientID], falling back to m.Default.
+func extractKeycloakRole(accessToken, clientID string, m RoleMapping) string {
 	parts := strings.Split(accessToken, ".")
 	if len(parts) != 3 {
-		return "staff"
+		return m.Default
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return "staff"
+		return m.Default
 	}
 	var claims keycloakTokenClaims
 	if err := json.Unmarshal(raw, &claims); err != nil {
-		return "staff"
+		return m.Default
 	}
 
 	roleSet := make(map[string]bool)
@@ -345,14 +375,12 @@ func extractKeycloakRole(accessToken, clientID string) string {
 		}
 	}
 
-	switch {
-	case roleSet["admin"]:
-		return "admin"
-	case roleSet["manager"]:
-		return "manager"
-	default:
-		return "staff"
+	for _, r := range m.Precedence {
+		if roleSet[r] {
+			return r
+		}
 	}
+	return m.Default
 }
 
 type keycloakUserInfo struct {

@@ -187,6 +187,7 @@ func (h *KeycloakHandler) DeviceAuthorize(c *gin.Context) {
 	form := url.Values{
 		"client_id": {h.cliClientID},
 		"scope":     {"openid email profile"},
+		"prompt":    {"login"},
 	}
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, h.deviceAuthURL, strings.NewReader(form.Encode()))
 	if err != nil {

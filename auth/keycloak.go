@@ -212,17 +212,6 @@ func (h *KeycloakHandler) DeviceAuthorize(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to decode keycloak response"})
 		return
 	}
-
-	// Rewrite the verification URIs to route through Keycloak's logout endpoint
-	// before the device grant page. This clears any existing browser session so
-	// the user is always prompted to log in fresh, regardless of Keycloak session state.
-	if vu, ok := dar["verification_uri"].(string); ok && vu != "" {
-		dar["verification_uri"] = h.logoutURL + "?redirect_uri=" + url.QueryEscape(vu)
-	}
-	if vuc, ok := dar["verification_uri_complete"].(string); ok && vuc != "" {
-		dar["verification_uri_complete"] = h.logoutURL + "?redirect_uri=" + url.QueryEscape(vuc)
-	}
-
 	c.JSON(http.StatusOK, dar)
 }
 

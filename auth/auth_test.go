@@ -25,13 +25,14 @@ func TestSignAndVerifySession(t *testing.T) {
 	email := "user@example.com"
 	name := "Test User"
 	role := "manager"
+	sub := "abc-123-sub"
 
-	cookie, err := signSession(email, name, role, secret)
+	cookie, err := signSession(email, name, role, sub, secret)
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}
 
-	gotEmail, gotName, gotRole, err := verifySession(cookie, secret)
+	gotEmail, gotName, gotRole, gotSub, err := verifySession(cookie, secret)
 	if err != nil {
 		t.Fatalf("verifySession: %v", err)
 	}
@@ -44,21 +45,70 @@ func TestSignAndVerifySession(t *testing.T) {
 	if gotRole != role {
 		t.Errorf("role: got %q, want %q", gotRole, role)
 	}
+	if gotSub != sub {
+		t.Errorf("sub: got %q, want %q", gotSub, sub)
+	}
 }
 
-func TestVerifySession_WrongSecret(t *testing.T) {
-	cookie, err := signSession("user@example.com", "Name", "staff", "secret-a")
+func TestSignSession_ProducesSixParts(t *testing.T) {
+	cookie, err := signSession("user@example.com", "Name", "staff", "sub-1", "secret")
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}
-	_, _, _, err = verifySession(cookie, "secret-b")
+	raw, err := base64.StdEncoding.DecodeString(cookie)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 6 {
+		t.Fatalf("expected 6 parts (v2 format), got %d: %v", len(parts), parts)
+	}
+}
+
+func TestVerifySession_LegacyFivePartAccepted(t *testing.T) {
+	secret := "secret"
+	cookie := signSessionV1At("user@example.com", "Name", "staff", secret, time.Now().Unix())
+
+	email, name, role, sub, err := verifySession(cookie, secret)
+	if err != nil {
+		t.Fatalf("verifySession: %v", err)
+	}
+	if email != "user@example.com" || name != "Name" || role != "staff" {
+		t.Errorf("got (%q,%q,%q), want (user@example.com,Name,staff)", email, name, role)
+	}
+	if sub != "" {
+		t.Errorf("sub: got %q, want empty for legacy v1 session", sub)
+	}
+}
+
+func TestVerifySession_SixPartAccepted(t *testing.T) {
+	secret := "secret"
+	cookie, err := signSession("user@example.com", "Name", "staff", "sub-42", secret)
+	if err != nil {
+		t.Fatalf("signSession: %v", err)
+	}
+	_, _, _, sub, err := verifySession(cookie, secret)
+	if err != nil {
+		t.Fatalf("verifySession: %v", err)
+	}
+	if sub != "sub-42" {
+		t.Errorf("sub: got %q, want %q", sub, "sub-42")
+	}
+}
+
+func TestVerifySession_WrongSecret(t *testing.T) {
+	cookie, err := signSession("user@example.com", "Name", "staff", "sub", "secret-a")
+	if err != nil {
+		t.Fatalf("signSession: %v", err)
+	}
+	_, _, _, _, err = verifySession(cookie, "secret-b")
 	if err == nil {
 		t.Fatal("expected error with wrong secret, got nil")
 	}
 }
 
 func TestVerifySession_TamperedPayload(t *testing.T) {
-	cookie, err := signSession("user@example.com", "Name", "staff", "secret")
+	cookie, err := signSession("user@example.com", "Name", "staff", "sub", "secret")
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}
@@ -68,14 +118,14 @@ func TestVerifySession_TamperedPayload(t *testing.T) {
 	tampered := strings.Replace(string(raw), "user@example.com", "evil@example.com", 1)
 	tamperedCookie := base64.StdEncoding.EncodeToString([]byte(tampered))
 
-	_, _, _, err = verifySession(tamperedCookie, "secret")
+	_, _, _, _, err = verifySession(tamperedCookie, "secret")
 	if err == nil {
 		t.Fatal("expected error for tampered payload, got nil")
 	}
 }
 
 func TestVerifySession_TamperedRole(t *testing.T) {
-	cookie, err := signSession("user@example.com", "Name", "staff", "secret")
+	cookie, err := signSession("user@example.com", "Name", "staff", "sub", "secret")
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}
@@ -85,14 +135,31 @@ func TestVerifySession_TamperedRole(t *testing.T) {
 	tampered := strings.Replace(string(raw), "|staff|", "|admin|", 1)
 	tamperedCookie := base64.StdEncoding.EncodeToString([]byte(tampered))
 
-	_, _, _, err = verifySession(tamperedCookie, "secret")
+	_, _, _, _, err = verifySession(tamperedCookie, "secret")
 	if err == nil {
 		t.Fatal("expected error for tampered role, got nil")
 	}
 }
 
+func TestVerifySession_TamperedSub(t *testing.T) {
+	cookie, err := signSession("user@example.com", "Name", "staff", "real-sub", "secret")
+	if err != nil {
+		t.Fatalf("signSession: %v", err)
+	}
+
+	// Swap in a different sub without re-signing
+	raw, _ := base64.StdEncoding.DecodeString(cookie)
+	tampered := strings.Replace(string(raw), "|real-sub|", "|evil-sub|", 1)
+	tamperedCookie := base64.StdEncoding.EncodeToString([]byte(tampered))
+
+	_, _, _, _, err = verifySession(tamperedCookie, "secret")
+	if err == nil {
+		t.Fatal("expected error for tampered sub, got nil")
+	}
+}
+
 func TestVerifySession_InvalidBase64(t *testing.T) {
-	_, _, _, err := verifySession("not-valid-base64!!!", "secret")
+	_, _, _, _, err := verifySession("not-valid-base64!!!", "secret")
 	if err == nil {
 		t.Fatal("expected error for invalid base64, got nil")
 	}
@@ -101,16 +168,36 @@ func TestVerifySession_InvalidBase64(t *testing.T) {
 func TestVerifySession_MalformedTooFewParts(t *testing.T) {
 	// Valid base64 but wrong structure
 	cookie := base64.StdEncoding.EncodeToString([]byte("onlytwoparts|here"))
-	_, _, _, err := verifySession(cookie, "secret")
+	_, _, _, _, err := verifySession(cookie, "secret")
 	if err == nil {
 		t.Fatal("expected error for malformed session, got nil")
 	}
 }
 
-// signSessionAt builds a valid cookie value with a caller-supplied Unix timestamp.
-// Used to test expiry and future-timestamp rejection without time.Sleep.
-func signSessionAt(email, name, role, secret string, ts int64) string {
+func TestVerifySession_MalformedSevenParts(t *testing.T) {
+	// Neither the 5-part (v1) nor 6-part (v2) shape is valid.
+	cookie := base64.StdEncoding.EncodeToString([]byte("a|b|c|d|e|f|g"))
+	_, _, _, _, err := verifySession(cookie, "secret")
+	if err == nil {
+		t.Fatal("expected error for 7-part session, got nil")
+	}
+}
+
+// signSessionV1At builds a legacy v1 (5-part, no sub) cookie value with a caller-supplied Unix
+// timestamp, exactly as pre-Theme-10 core would have minted it. Used to prove verifySession
+// still accepts sessions signed before this change.
+func signSessionV1At(email, name, role, secret string, ts int64) string {
 	payload := fmt.Sprintf("%s|%s|%s|%d", email, name, role, ts)
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+	return base64.StdEncoding.EncodeToString([]byte(payload + "|" + sig))
+}
+
+// signSessionAt builds a valid v2 (6-part) cookie value with a caller-supplied Unix timestamp.
+// Used to test expiry and future-timestamp rejection without time.Sleep.
+func signSessionAt(email, name, role, sub, secret string, ts int64) string {
+	payload := fmt.Sprintf("%s|%s|%s|%s|%d", email, name, role, sub, ts)
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
@@ -120,8 +207,8 @@ func signSessionAt(email, name, role, secret string, ts int64) string {
 func TestVerifySession_Expired(t *testing.T) {
 	secret := "secret"
 	old := time.Now().Add(-25 * time.Hour).Unix() // older than sessionMaxAge (24h)
-	cookie := signSessionAt("user@example.com", "Name", "staff", secret, old)
-	_, _, _, err := verifySession(cookie, secret)
+	cookie := signSessionAt("user@example.com", "Name", "staff", "sub", secret, old)
+	_, _, _, _, err := verifySession(cookie, secret)
 	if err == nil {
 		t.Fatal("expected error for expired session, got nil")
 	}
@@ -130,10 +217,20 @@ func TestVerifySession_Expired(t *testing.T) {
 func TestVerifySession_FutureTimestamp(t *testing.T) {
 	secret := "secret"
 	future := time.Now().Add(1 * time.Hour).Unix() // 1 hour in the future
-	cookie := signSessionAt("user@example.com", "Name", "staff", secret, future)
-	_, _, _, err := verifySession(cookie, secret)
+	cookie := signSessionAt("user@example.com", "Name", "staff", "sub", secret, future)
+	_, _, _, _, err := verifySession(cookie, secret)
 	if err == nil {
 		t.Fatal("expected error for future session timestamp, got nil")
+	}
+}
+
+func TestVerifySession_LegacyExpired(t *testing.T) {
+	secret := "secret"
+	old := time.Now().Add(-25 * time.Hour).Unix()
+	cookie := signSessionV1At("user@example.com", "Name", "staff", secret, old)
+	_, _, _, _, err := verifySession(cookie, secret)
+	if err == nil {
+		t.Fatal("expected error for expired legacy session, got nil")
 	}
 }
 
@@ -193,7 +290,7 @@ func TestRequireSession_InvalidCookie(t *testing.T) {
 
 func TestRequireSession_ValidCookie(t *testing.T) {
 	secret := "test-secret"
-	cookie, err := signSession("user@example.com", "Test User", "manager", secret)
+	cookie, err := signSession("user@example.com", "Test User", "manager", "sub-99", secret)
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}
@@ -233,11 +330,40 @@ func TestRequireSession_ValidCookie(t *testing.T) {
 	if role != "manager" {
 		t.Errorf("userRole: got %q, want %q", role, "manager")
 	}
+
+	sub, exists := c.Get("userSub")
+	if !exists {
+		t.Fatal("userSub not set in context")
+	}
+	if sub != "sub-99" {
+		t.Errorf("userSub: got %q, want %q", sub, "sub-99")
+	}
+}
+
+func TestRequireSession_LegacyCookieSetsEmptySub(t *testing.T) {
+	secret := "test-secret"
+	cookie := signSessionV1At("user@example.com", "Test User", "manager", secret, time.Now().Unix())
+
+	c, w := newTestContext(http.MethodGet, "/")
+	c.Request.AddCookie(&http.Cookie{Name: sessionCookieName, Value: cookie})
+
+	RequireSession(secret, false)(c)
+
+	if w.Code == http.StatusUnauthorized {
+		t.Errorf("should not be unauthorized with valid legacy cookie")
+	}
+	sub, exists := c.Get("userSub")
+	if !exists {
+		t.Fatal("userSub not set in context for legacy session")
+	}
+	if sub != "" {
+		t.Errorf("userSub: got %q, want empty for legacy session", sub)
+	}
 }
 
 func TestRequireSession_ValidBearerToken(t *testing.T) {
 	secret := "test-secret"
-	token, err := signSession("api@example.com", "API User", "admin", secret)
+	token, err := signSession("api@example.com", "API User", "admin", "sub-1", secret)
 	if err != nil {
 		t.Fatalf("signSession: %v", err)
 	}
@@ -269,6 +395,13 @@ func TestRequireSession_AuthDisabled(t *testing.T) {
 	}
 	if role != "admin" {
 		t.Errorf("auth disabled should grant admin role, got %q", role)
+	}
+	sub, exists := c.Get("userSub")
+	if !exists {
+		t.Fatal("userSub not set in context when auth is disabled")
+	}
+	if sub == "" {
+		t.Error("auth disabled should set a non-empty dev userSub")
 	}
 }
 

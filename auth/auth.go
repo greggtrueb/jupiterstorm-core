@@ -94,8 +94,9 @@ func (h *Handler) Callback(c *gin.Context) {
 
 	role := "staff"
 
-	// Create signed session cookie
-	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
+	// Create signed session cookie. The direct-Google path has no stable subject
+	// claim to carry (googleUserInfo is {Email, Name} only), so sub is empty.
+	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, "", h.sessionSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
@@ -115,7 +116,10 @@ func (h *Handler) Logout(c *gin.Context) {
 // It accepts the signed session value either as a cookie (browser clients) or
 // as an Authorization: Bearer <value> header (CLI/API clients).
 //
-// On success it sets "userEmail", "userName", and "userRole" in the Gin context.
+// On success it sets "userEmail", "userName", "userRole", and "userSub" in the Gin context.
+// userEmail/userName/userRole are frozen — unchanged by this addition. userSub is Keycloak's
+// stable subject claim; it is "" for sessions minted before this change (v1) or by the legacy
+// direct-Google path, which has no stable ID.
 //
 // When authDisabled is true all requests are allowed through with a fixed dev
 // identity (admin role) — only set this via AUTH_DISABLED=true in non-production environments.
@@ -125,6 +129,7 @@ func RequireSession(sessionSecret string, authDisabled bool) gin.HandlerFunc {
 			c.Set("userEmail", "dev@local")
 			c.Set("userName", "Dev User")
 			c.Set("userRole", "admin")
+			c.Set("userSub", "dev-sub")
 			c.Next()
 			return
 		}
@@ -142,7 +147,7 @@ func RequireSession(sessionSecret string, authDisabled bool) gin.HandlerFunc {
 			}
 		}
 
-		email, name, role, err := verifySession(sessionValue, sessionSecret)
+		email, name, role, sub, err := verifySession(sessionValue, sessionSecret)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
 			return
@@ -151,6 +156,7 @@ func RequireSession(sessionSecret string, authDisabled bool) gin.HandlerFunc {
 		c.Set("userEmail", email)
 		c.Set("userName", name)
 		c.Set("userRole", role)
+		c.Set("userSub", sub)
 		c.Next()
 	}
 }
@@ -200,9 +206,14 @@ func fetchGoogleUserInfo(ctx context.Context, accessToken string) (*googleUserIn
 	return &info, nil
 }
 
-// signSession creates a base64-encoded "email|name|role|timestamp|hmac" cookie value.
-func signSession(email, name, role, secret string) (string, error) {
-	payload := fmt.Sprintf("%s|%s|%s|%d", email, name, role, time.Now().Unix())
+// signSession creates a base64-encoded "email|name|role|sub|timestamp|hmac" cookie value.
+// sub is Keycloak's stable subject claim; pass "" for identity providers that don't have one
+// (the legacy direct-Google path).
+func signSession(email, name, role, sub, secret string) (string, error) {
+	if strings.Contains(email, "|") || strings.Contains(name, "|") || strings.Contains(role, "|") || strings.Contains(sub, "|") {
+		return "", fmt.Errorf("session fields must not contain '|'")
+	}
+	payload := fmt.Sprintf("%s|%s|%s|%s|%d", email, name, role, sub, time.Now().Unix())
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	sig := base64.StdEncoding.EncodeToString(mac.Sum(nil))
@@ -211,44 +222,56 @@ func signSession(email, name, role, secret string) (string, error) {
 
 const sessionMaxAge = 24 * time.Hour
 
-// verifySession validates the HMAC signature, checks expiry, and returns email, name, and role.
-func verifySession(cookie, secret string) (string, string, string, error) {
+// verifySession validates the HMAC signature, checks expiry, and returns email, name, role, and sub.
+//
+// Sessions are shared across products via SESSION_SECRET, so this accepts two wire formats:
+//   - v1 (5 parts): email|name|role|ts|mac — sub is returned as "" for these
+//   - v2 (6 parts): email|name|role|sub|ts|mac
+//
+// The v1 branch exists only so a cookie/CLI token minted before this change keeps working; it can
+// be deleted once every session minted before the deploy has expired (sessionMaxAge after rollout).
+func verifySession(cookie, secret string) (string, string, string, string, error) {
 	raw, err := base64.StdEncoding.DecodeString(cookie)
 	if err != nil {
-		return "", "", "", fmt.Errorf("invalid cookie encoding")
+		return "", "", "", "", fmt.Errorf("invalid cookie encoding")
 	}
 
-	parts := strings.SplitN(string(raw), "|", 5)
-	if len(parts) != 5 {
-		return "", "", "", fmt.Errorf("malformed session")
-	}
+	parts := strings.Split(string(raw), "|")
 
-	email, name, role, tsStr, sig := parts[0], parts[1], parts[2], parts[3], parts[4]
-	payload := strings.Join(parts[:4], "|")
+	var email, name, role, sub, tsStr, sig string
+	switch len(parts) {
+	case 5: // v1: email|name|role|ts|sig
+		email, name, role, tsStr, sig = parts[0], parts[1], parts[2], parts[3], parts[4]
+	case 6: // v2: email|name|role|sub|ts|sig
+		email, name, role, sub, tsStr, sig = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
+	default:
+		return "", "", "", "", fmt.Errorf("malformed session")
+	}
+	payload := strings.Join(parts[:len(parts)-1], "|")
 
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	expected := base64.StdEncoding.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(sig), []byte(expected)) {
-		return "", "", "", fmt.Errorf("invalid session signature")
+		return "", "", "", "", fmt.Errorf("invalid session signature")
 	}
 
 	var ts int64
 	if _, err := fmt.Sscanf(tsStr, "%d", &ts); err != nil {
-		return "", "", "", fmt.Errorf("malformed session timestamp")
+		return "", "", "", "", fmt.Errorf("malformed session timestamp")
 	}
 
 	issuedAt := time.Unix(ts, 0)
 	now := time.Now()
 	if issuedAt.After(now) {
-		return "", "", "", fmt.Errorf("invalid session timestamp")
+		return "", "", "", "", fmt.Errorf("invalid session timestamp")
 	}
 	if now.Sub(issuedAt) > sessionMaxAge {
-		return "", "", "", fmt.Errorf("session expired")
+		return "", "", "", "", fmt.Errorf("session expired")
 	}
 
-	return email, name, role, nil
+	return email, name, role, sub, nil
 }
 
 const oauthStateCookie = "oauth_state"

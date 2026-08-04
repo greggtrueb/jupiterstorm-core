@@ -116,6 +116,25 @@ func TestFetchKeycloakUserInfo_Success(t *testing.T) {
 	}
 }
 
+func TestFetchKeycloakUserInfo_Sub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(keycloakUserInfo{
+			Sub:   "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+			Email: "user@example.com",
+			Name:  "Test User",
+		})
+	}))
+	defer srv.Close()
+
+	info, err := fetchKeycloakUserInfo(context.Background(), srv.URL, "mytoken", "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if info.Sub != "f47ac10b-58cc-4372-a567-0e02b2c3d479" {
+		t.Errorf("sub: got %q", info.Sub)
+	}
+}
+
 func TestFetchKeycloakUserInfo_NameFallback(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(keycloakUserInfo{

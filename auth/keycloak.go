@@ -171,7 +171,7 @@ func (h *KeycloakHandler) Callback(c *gin.Context) {
 
 	role := extractKeycloakRole(token.AccessToken, h.config.ClientID, h.effectiveMapping())
 
-	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
+	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, userInfo.Sub, h.sessionSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
@@ -284,7 +284,7 @@ func (h *KeycloakHandler) DeviceToken(c *gin.Context) {
 
 	role := extractKeycloakRole(accessToken, h.cliClientID, h.effectiveMapping())
 
-	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
+	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, userInfo.Sub, h.sessionSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
@@ -317,7 +317,7 @@ func (h *KeycloakHandler) ExchangeToken(c *gin.Context) {
 
 	role := extractKeycloakRole(req.AccessToken, h.config.ClientID, h.effectiveMapping())
 
-	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, h.sessionSecret)
+	sessionValue, err := signSession(userInfo.Email, userInfo.Name, role, userInfo.Sub, h.sessionSecret)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
 		return
@@ -384,6 +384,7 @@ func extractKeycloakRole(accessToken, clientID string, m RoleMapping) string {
 }
 
 type keycloakUserInfo struct {
+	Sub               string `json:"sub"`
 	Email             string `json:"email"`
 	Name              string `json:"name"`
 	PreferredUsername string `json:"preferred_username"`

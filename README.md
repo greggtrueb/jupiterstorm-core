@@ -32,20 +32,30 @@ import "github.com/greggtrueb/jupiterstorm-core/auth"
 
 ### Integration contract
 
-`RequireSession` sets three keys on the Gin context, which consuming handlers read:
+`RequireSession` sets four keys on the Gin context, which consuming handlers read:
 
 - `userEmail` — authenticated user's email
 - `userName` — display name
 - `userRole` — one of `admin`, `manager`, `staff`
+- `userSub` — Keycloak's stable subject claim (`sub`), or `""` for sessions minted before this field
+  existed (v1, see below) or by the legacy direct-Google path, which has no stable ID
 
-These keys are the stable public interface between core and any product. Treat them as frozen.
+`userEmail`, `userName`, and `userRole` are the stable public interface between core and any product.
+Treat them as frozen. `userSub` is additive — a product may ignore it entirely and nothing changes.
 
 ### Cross-product identity
 
-Sessions are stateless: a signed token is an HMAC over `SESSION_SECRET` carrying `email|name|role` plus a
-timestamp — no database lookup on the request path. Two products that share the same `SESSION_SECRET` and
+Sessions are stateless: a signed token is an HMAC over `SESSION_SECRET` carrying `email|name|role|sub` plus
+a timestamp — no database lookup on the request path. Two products that share the same `SESSION_SECRET` and
 Keycloak realm will validate each other's sessions with no network call. This is the intended mechanism for
 a second product to reuse JupiterStorm identity.
+
+**Session wire format v1/v2 compatibility.** `sub` was added after `email|name|role|ts|mac` was already the
+shipped format. `verifySession` accepts both: a 5-part value (`email|name|role|ts|mac`, legacy — `sub`
+returns as `""`) and a 6-part value (`email|name|role|sub|ts|mac`, current). `signSession` always mints the
+6-part form. Sessions expire after 24h, so the 5-part branch is dead weight a day after every product
+sharing `SESSION_SECRET` has deployed this change — but not before, since a hard cutover would log out
+every session minted under the old format.
 
 `AUTH_DISABLED=true` makes `RequireSession` pass every request through as a fixed dev identity
 (`dev@local`, role `admin`). Never set this in production.

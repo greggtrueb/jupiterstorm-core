@@ -210,6 +210,9 @@ func fetchGoogleUserInfo(ctx context.Context, accessToken string) (*googleUserIn
 // sub is Keycloak's stable subject claim; pass "" for identity providers that don't have one
 // (the legacy direct-Google path).
 func signSession(email, name, role, sub, secret string) (string, error) {
+	if strings.Contains(email, "|") || strings.Contains(name, "|") || strings.Contains(role, "|") || strings.Contains(sub, "|") {
+		return "", fmt.Errorf("session fields must not contain '|'")
+	}
 	payload := fmt.Sprintf("%s|%s|%s|%s|%d", email, name, role, sub, time.Now().Unix())
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))

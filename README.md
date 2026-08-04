@@ -50,10 +50,10 @@ a timestamp — no database lookup on the request path. Two products that share 
 Keycloak realm will validate each other's sessions with no network call. This is the intended mechanism for
 a second product to reuse JupiterStorm identity.
 
-**Session wire format v1/v2 compatibility.** `sub` was added after `email|name|role` was already the
-shipped format. `verifySession` accepts both: a 5-field payload (`email|name|role|ts`, legacy — `sub`
-returns as `""`) and a 6-field payload (`email|name|role|sub|ts`, current). `signSession` always mints the
-6-field form. Sessions expire after 24h, so the 5-field branch is dead weight a day after every product
+**Session wire format v1/v2 compatibility.** `sub` was added after `email|name|role|ts|mac` was already the
+shipped format. `verifySession` accepts both: a 5-part value (`email|name|role|ts|mac`, legacy — `sub`
+returns as `""`) and a 6-part value (`email|name|role|sub|ts|mac`, current). `signSession` always mints the
+6-part form. Sessions expire after 24h, so the 5-part branch is dead weight a day after every product
 sharing `SESSION_SECRET` has deployed this change — but not before, since a hard cutover would log out
 every session minted under the old format.
 
